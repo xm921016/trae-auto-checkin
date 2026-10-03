@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# 日志
+*.log
+checkin_log.jsonl
+logs/
+
+# refresh token 缓存（云端工作区临时文件，绝不入库）
+.refresh_token
+.refresh_token_*
+
+# 本地测试脚本
+_test_*.py
+
+# 临时文件
+*.tmp
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
