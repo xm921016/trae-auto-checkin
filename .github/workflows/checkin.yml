@@ -1,0 +1,47 @@
+# Trae CN / TRAE SOLO CN 每日自动签到
+# 每天 UTC 16:30 运行（北京时间 00:30）
+
+name: Trae Daily Check-in
+
+on:
+  schedule:
+    # 每天 00:30 北京时间 (UTC+8) -> UTC 16:30
+    - cron: '30 16 * * *'
+  workflow_dispatch:   # 允许手动触发
+
+jobs:
+  checkin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install requests pycryptodome
+
+      - name: Run Trae check-in
+        env:
+          # 账号1（必需，至少配置一个）
+          TRAE_ACCESS_TOKEN: ${{ secrets.TRAE_ACCESS_TOKEN }}
+          TRAE_REFRESH_TOKEN: ${{ secrets.TRAE_REFRESH_TOKEN }}
+          TRAE_USER_REGION: ${{ secrets.TRAE_USER_REGION }}
+          # 账号2+（可选）
+          TRAE_ACCESS_TOKEN_2: ${{ secrets.TRAE_ACCESS_TOKEN_2 }}
+          TRAE_REFRESH_TOKEN_2: ${{ secrets.TRAE_REFRESH_TOKEN_2 }}
+          TRAE_USER_REGION_2: ${{ secrets.TRAE_USER_REGION_2 }}
+          TRAE_ACCESS_TOKEN_3: ${{ secrets.TRAE_ACCESS_TOKEN_3 }}
+          TRAE_REFRESH_TOKEN_3: ${{ secrets.TRAE_REFRESH_TOKEN_3 }}
+          TRAE_USER_REGION_3: ${{ secrets.TRAE_USER_REGION_3 }}
+          # 邮件通知（可选，SMTP_HOST 等全部配置才会发送）
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+        run: python trae_checkin.py
