@@ -4,20 +4,13 @@ Trae CN / TRAE SOLO CN 每日自动签到脚本
 ========================================
 调用 Trae 官方接口领取每日签到积分（基础 100 + 额外 100 = 每日 200）。
 
-接口（已实测调通）:
-    POST https://api.trae.cn/trae/api/v2/ug/checkin_credits/status   查询签到状态
-    POST https://api.trae.cn/trae/api/v2/ug/checkin_credits/claim    领取每日签到
-鉴权:
-    Authorization: Cloud-IDE-JWT <accessToken>
-    X-User-Region: CN（可选）
-    x-device-id: <device_id>（可选）
+接口:
+    POST {host}/trae/api/v2/ug/checkin_credits/status   查询签到状态
+    POST {host}/trae/api/v2/ug/checkin_credits/claim    领取每日签到
 
 Token 来源（按优先级）:
-    1. 环境变量 TRAE_ACCESS_TOKEN / TRAE_REFRESH_TOKEN（GitHub Actions 注入 Secrets）
-    2. 本地 Trae CN / TRAE SOLO CN 客户端登录态文件（AES 解密）:
-       %APPDATA%/Trae CN/User/globalStorage/storage.json
-       %APPDATA%/TRAE SOLO CN/User/globalStorage/storage.json
-       （token 不进代码仓库）
+    1. 环境变量 TRAE_ACCESS_TOKEN / TRAE_REFRESH_TOKEN（GitHub Actions Secrets）
+    2. 本地 Trae CN / TRAE SOLO CN 客户端登录态文件（AES 解密）
 
 运行:
     python trae_checkin.py
@@ -29,10 +22,13 @@ import datetime
 import hashlib
 import json
 import os
+import random
 import smtplib
 import ssl
+import string
 import sys
 import time
+import uuid
 from email.header import Header
 from email.mime.text import MIMEText
 from email.utils import formataddr
@@ -46,10 +42,7 @@ except ImportError:
     print("缺少依赖，请先: pip install requests pycryptodome")
     sys.exit(1)
 
-# ===== 配置 =====
-API_BASE = "https://api.trae.cn/trae/api/v2/ug/checkin_credits"
-REQ_SOURCE = 1  # 1=Trae CN IDE
-
+# ===== 常量 =====
 # iCube 登录态解密常量（与 Trae 客户端加密格式对应）
 HDR_LEN = 6
 KEY_LEN = 32
@@ -63,14 +56,15 @@ DRE = bytes([31, 221, 168, 51, 136, 7, 199, 49, 177, 18, 16, 89, 39, 128, 236, 9
              160, 224, 59, 77, 174, 42, 245, 176, 200, 235, 187, 60, 131, 83, 153, 97,
              23, 43, 4, 126, 186, 119, 214, 38, 225, 105, 20, 99, 85, 33, 12, 125])
 
-# %APPDATA% 下的应用数据目录名（支持多客户端）
 APP_DIRS = ["Trae CN", "TRAE SOLO CN", "Trae", "TRAE SOLO"]
+
+DEFAULT_HOST = "https://api.trae.cn"
+DEFAULT_APP_ID = "6eefa01c-1036-4c7e-9ca5-d891f63bfcd8"
+REFRESH_CLIENT_ID = "ono9krqynydwx5"
 
 BASE_DIR = Path(__file__).parent.resolve()
 LOG_FILE = BASE_DIR / "checkin_log.jsonl"
 LOG_TEXT_FILE = BASE_DIR / "checkin.log"
-# refresh token 缓存文件（云端工作区临时文件，已 gitignore）
-REFRESH_TOKEN_FILE = BASE_DIR / ".refresh_token"
 
 
 # ===== 日志 =====
@@ -86,7 +80,6 @@ def log(msg):
 
 
 def append_log(record, account=None):
-    """追加一条 JSONL 日志"""
     try:
         record["ts"] = datetime.datetime.now().isoformat()
         if account:
@@ -99,7 +92,7 @@ def append_log(record, account=None):
 
 # ===== 解密 =====
 def decrypt_auth(b64_text):
-    """解密 iCubeAuthInfo 加密串，返回含 token / userRegion / refreshToken 的 dict"""
+    """解密 iCubeAuthInfo 加密串"""
     t = base64.b64decode(b64_text)
     key = t[HDR_LEN:HDR_LEN + KEY_LEN]
     sha = hashlib.sha512(key).digest()
@@ -108,31 +101,56 @@ def decrypt_auth(b64_text):
     aes_key, iv = h[:16], h[16:32]
     ct = t[HDR_LEN + KEY_LEN:]
     plain = unpad(AES.new(aes_key, AES.MODE_CBC, iv).decrypt(ct), AES.block_size)
+    # plain = stored_hash(64) + payload
     return json.loads(plain[HMAC_LEN:].decode("utf-8"))
+
+
+# ===== 设备指纹 =====
+def detect_os():
+    import platform
+    system = platform.system().lower()
+    release = platform.release()
+    if system == "darwin":
+        return "mac", f"Darwin {release}"
+    elif system == "windows":
+        return "windows", f"Windows {release}"
+    elif system == "linux":
+        return "linux", f"Linux {release}"
+    return "unknown", system
+
+
+def read_device_fingerprint(storage):
+    """从 storage.json 读取 machineId / deviceId / ideVersion"""
+    fp = {}
+    machine_id = storage.get("telemetry.machineId", "")
+    if machine_id:
+        fp["machineId"] = machine_id
+    for k in storage.keys():
+        import re
+        m = re.match(r"^iCubeAuthInfo:\/\/icube-dc:(\d+)$", k)
+        if m:
+            fp["deviceId"] = m.group(1)
+            break
+    ver = storage.get("iCubeLastVersion", "")
+    if isinstance(ver, str) and ver.strip():
+        fp["ideVersion"] = ver.strip()
+        fp["ideVersionCode"] = ver.strip().replace(".", "")
+    return fp
 
 
 # ===== 账号加载 =====
 def scan_targets():
-    """扫描目标 [(名称, storage.json 路径, 应用数据目录)]，按路径去重"""
     appdata = os.environ.get("APPDATA", "")
     targets = []
     for n in APP_DIRS:
         sf = Path(appdata) / n / "User" / "globalStorage" / "storage.json"
-        ad = Path(appdata) / n
-        targets.append((n, sf, ad))
-    seen, uniq = set(), []
-    for name, sf, d in targets:
-        key = str(sf).lower()
-        if key not in seen:
-            seen.add(key)
-            uniq.append((name, sf, d))
-    return uniq
+        targets.append((n, sf))
+    return targets
 
 
 def load_accounts_from_local():
-    """从本地客户端 storage.json 读取账号列表"""
     accounts, seen = [], set()
-    for name, path, _ in scan_targets():
+    for name, path in scan_targets():
         try:
             if not path.exists():
                 continue
@@ -143,11 +161,14 @@ def load_accounts_from_local():
             auth = decrypt_auth(enc)
             token = auth.get("token")
             if not token:
-                log(f"跳过 [{name}]：token 为空")
                 continue
             if token in seen:
                 continue
             seen.add(token)
+            # 附加设备指纹
+            fp = read_device_fingerprint(storage)
+            auth["_fingerprint"] = fp
+            auth["_host"] = auth.get("host") or DEFAULT_HOST
             accounts.append((name, auth))
             log(f"从本地加载账号: [{name}] (userId={auth.get('userId', '?')})")
         except Exception as e:
@@ -156,26 +177,30 @@ def load_accounts_from_local():
 
 
 def load_accounts_from_env():
-    """从环境变量加载账号（支持 TRAE_ACCESS_TOKEN / TRAE_REFRESH_TOKEN / TRAE_USER_REGION）"""
     accounts = []
     i = 1
     while True:
         suffix = "" if i == 1 else f"_{i}"
         tok = os.environ.get(f"TRAE_ACCESS_TOKEN{suffix}", "").strip()
         if not tok and i > 1:
-            break  # 连续缺失则停止
+            break
         if not tok:
-            # 账号1 没有 env token，继续检查账号2+
             if i == 1:
                 i += 1
                 continue
             break
-        region = os.environ.get(f"TRAE_USER_REGION{suffix}", "").strip() or "CN"
         auth = {
             "token": tok,
             "refreshToken": os.environ.get(f"TRAE_REFRESH_TOKEN{suffix}", "").strip(),
-            "userRegion": {"region": region},
             "userId": os.environ.get(f"TRAE_USER_ID{suffix}", "").strip(),
+            "userRegion": {"region": os.environ.get(f"TRAE_USER_REGION{suffix}", "").strip() or "CN"},
+            "_host": os.environ.get(f"TRAE_API_HOST{suffix}", "").strip() or DEFAULT_HOST,
+            "_fingerprint": {
+                "deviceId": os.environ.get(f"TRAE_DEVICE_ID{suffix}", "").strip() or None,
+                "machineId": os.environ.get(f"TRAE_MACHINE_ID{suffix}", "").strip() or None,
+                "ideVersion": os.environ.get(f"TRAE_IDE_VERSION{suffix}", "").strip() or None,
+                "ideVersionCode": os.environ.get(f"TRAE_IDE_VERSION_CODE{suffix}", "").strip() or None,
+            },
         }
         label = f"账号{suffix.lstrip('_')}"
         accounts.append((label, auth))
@@ -185,7 +210,6 @@ def load_accounts_from_env():
 
 
 def load_all_accounts():
-    """合并本地 + 环境变量账号，按 token 去重"""
     all_accounts, seen = [], set()
     for label, auth in load_accounts_from_env() + load_accounts_from_local():
         tok = auth.get("token", "")
@@ -196,36 +220,84 @@ def load_all_accounts():
     return all_accounts
 
 
-# ===== API 调用 =====
-def api_call(url, token, region="", device_id=""):
-    """调用 Trae API"""
+# ===== Token 自动刷新 =====
+def refresh_token(auth):
+    """用 refreshToken 换新 accessToken。成功则更新 auth dict 并返回 True"""
+    refresh_tok = auth.get("refreshToken")
+    uid = auth.get("userId")
+    if not refresh_tok or not uid:
+        return False
+    host = auth.get("_host", DEFAULT_HOST)
+    try:
+        r = requests.post(
+            f"{host}/cloudide/api/v3/trae/oauth/ExchangeToken",
+            headers={"Content-Type": "application/json"},
+            json={
+                "ClientID": REFRESH_CLIENT_ID,
+                "RefreshToken": refresh_tok,
+                "ClientSecret": "-",
+                "UserID": str(uid),
+            },
+            timeout=15,
+        )
+        j = r.json()
+        result = (j.get("Result") or {})
+        new_tok = result.get("Token")
+        if new_tok:
+            auth["token"] = new_tok
+            return True
+    except Exception as e:
+        log(f"WARN token 刷新失败: {e}")
+    return False
+
+
+# ===== Headers & API =====
+def build_headers(auth):
+    """构造完整请求 headers（与 Trae 客户端一致）"""
+    token = auth["token"]
+    uid = str(auth.get("userId", ""))
+    fp = auth.get("_fingerprint") or {}
+    device_type, os_version = detect_os()
+
+    # 生成稳定的 device-id（无则随机）
+    dev_id = fp.get("deviceId") or hashlib.sha256(uuid.uuid4().bytes).hexdigest()[:32]
+    machine_id = fp.get("machineId") or hashlib.sha256(uuid.uuid4().bytes).hexdigest()
+
     headers = {
         "Authorization": f"Cloud-IDE-JWT {token}",
+        "X-Cloudide-Token": token,
+        "x-uid": uid,
+        "x-app-id": DEFAULT_APP_ID,
+        "x-device-id": dev_id,
+        "x-machine-id": machine_id,
+        "x-request-id": str(uuid.uuid4()),
+        "x-ide-version": fp.get("ideVersion") or "3.5.0",
+        "x-ide-version-code": fp.get("ideVersionCode") or "20260101",
+        "x-device-type": device_type,
+        "x-os-version": os_version,
         "Content-Type": "application/json",
-        "x-device-id": device_id,
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) TraeCheckin/1.0",
+        "Accept": "application/json",
+        "User-Agent": "TraeCheckin/1.0",
     }
-    if region:
-        headers["X-User-Region"] = region
-    resp = requests.post(url, headers=headers, json={"req_source": REQ_SOURCE}, timeout=30)
+    return headers
+
+
+def checkin_api(auth, path):
+    """发请求到 checkin_credits 接口。成功返回 (status_code, json_body)"""
+    host = auth.get("_host", DEFAULT_HOST)
+    url = f"{host}/trae/api/v2/ug/checkin_credits/{path}"
+    headers = build_headers(auth)
+    # status: 空 body {} 即可; claim 也是空 body！（和 Trae 客户端一致）
+    body = {}
+    resp = requests.post(url, headers=headers, json=body, timeout=30)
     try:
-        body = resp.json()
+        return resp.status_code, resp.json()
     except Exception:
-        body = {"code": resp.status_code, "message": resp.text[:300]}
-    return resp.status_code, body
+        return resp.status_code, {"message": resp.text[:300]}
 
 
-def unwrap_resp(body):
-    """兼容 {checked_in:...} 与 {code:0, data:{checked_in:...}} 两种返回格式"""
-    if ("checked_in" not in body and isinstance(body.get("data"), dict)
-            and "checked_in" in body["data"]):
-        return body["data"]
-    return body
-
-
-# ===== 邮件通知 =====
+# ===== 邮件 =====
 def send_email(subject, body, account_label=None):
-    """通过 SMTP 发送邮件（失败不抛异常）"""
     if account_label:
         subject = f"[{account_label}] {subject}"
     host = os.environ.get("SMTP_HOST", "")
@@ -246,10 +318,10 @@ def send_email(subject, body, account_label=None):
         msg["From"] = formataddr((str(Header("Trae签到", "utf-8")), user))
         msg["To"] = to
         context = ssl.create_default_context()
-        with smtplib.SMTP_SSL(host, port, timeout=30, context=context) as server:
-            server.login(user, password)
-            server.sendmail(user, [to], msg.as_string())
-        log(f"OK 已发送邮件到 {to}: {subject}")
+        with smtplib.SMTP_SSL(host, port, timeout=30, context=context) as s:
+            s.login(user, password)
+            s.sendmail(user, [to], msg.as_string())
+        log(f"OK 已发送邮件到 {to}")
         return True
     except Exception as e:
         log(f"ERROR 邮件发送失败: {e}")
@@ -258,95 +330,97 @@ def send_email(subject, body, account_label=None):
 
 # ===== 签到主流程 =====
 def process_account(args, label, auth):
-    """对单个账号执行签到主流程。返回 0=成功/正常，非0=失败。"""
-    token = auth["token"]
-    region = (auth.get("userRegion") or {}).get("region", "")
     log(f"===== [{label}] 开始签到 =====")
 
-    # 1. 查询签到状态
+    # Token 临期自动刷新
     try:
-        code, body = api_call(f"{API_BASE}/status", token, region)
-        log(f"[{label}] status -> HTTP {code}, body={json.dumps(body, ensure_ascii=False)[:200]}")
-        if code != 200 or (body.get("code") != 0 and body.get("message") != "success"):
+        expired_at = int(auth.get("expiredAt") or 0)
+    except (ValueError, TypeError):
+        expired_at = 0
+    if expired_at and expired_at / 1000 < time.time() + 30 * 60:
+        log(f"[{label}] token 即将过期，尝试刷新...")
+        if refresh_token(auth):
+            log(f"  token 刷新成功 ✅")
+
+    # 1. 查询状态
+    try:
+        code, body = checkin_api(auth, "status")
+        log(f"[{label}] status -> HTTP {code}")
+        log(f"  {json.dumps(body, ensure_ascii=False)[:200]}")
+        if code == 401:
+            # token 过期，尝试刷新后重试
+            log(f"[{label}] 收到 401，刷新 token 后重试...")
+            if refresh_token(auth):
+                code, body = checkin_api(auth, "status")
+                log(f"  重试后 HTTP {code}")
+        if code != 200 or body.get("code") not in (0, None):
             log(f"ERROR [{label}] 查询状态失败")
             append_log({"event": "status_fail", "ok": False, "http": code, "resp": body}, account=label)
             send_email("⚠️ Trae 签到：查询状态异常",
-                       f"[{label}]\n查询签到状态失败\nHTTP {code}\n响应: {json.dumps(body, ensure_ascii=False)[:500]}\n时间: {datetime.datetime.now()}",
+                       f"[{label}]\nHTTP {code}\n响应: {json.dumps(body, ensure_ascii=False)[:500]}\n时间: {datetime.datetime.now()}",
                        account_label=label)
             return 1
-        data = unwrap_resp(body)
     except Exception as e:
         log(f"ERROR [{label}] 查询状态异常: {e}")
         append_log({"event": "status_error", "ok": False, "msg": str(e)}, account=label)
         return 1
 
     summary = {
-        "checked_in": data.get("checked_in", False),
-        "enable": data.get("enable", False),
-        "credits": data.get("credits", 0),
-        "extra_credits": data.get("extra_credits", 0),
-        "did_checked_in": data.get("did_checked_in", False),
-        "message": data.get("message", ""),
+        "checked_in": body.get("checked_in", False),
+        "enable": body.get("enable", False),
+        "credits": body.get("credits", 0),
+        "extra_credits": body.get("extra_credits", 0),
+        "did_checked_in": body.get("did_checked_in", False),
     }
     log(f"[{label}] 状态摘要: {json.dumps(summary, ensure_ascii=False)}")
 
     if args.check_only:
-        log(f"[{label}] --check-only 模式，不领取")
         append_log({"event": "check_only", "ok": True, "summary": summary}, account=label)
         return 0
 
-    if data.get("checked_in"):
-        credits = data.get("credits", 0)
-        extra = data.get("extra_credits", 0)
+    if body.get("checked_in"):
+        credits = body.get("credits", 0)
+        extra = body.get("extra_credits", 0)
         log(f"✅ [{label}] 今日已签到（基础 {credits} + 额外 {extra} = {credits + extra} 积分）")
         append_log({"event": "already", "ok": True, "summary": summary}, account=label)
         return 0
 
-    if not data.get("enable"):
+    if not body.get("enable"):
         log(f"INFO [{label}] 签到活动未启用，跳过")
         append_log({"event": "disabled", "ok": True, "summary": summary}, account=label)
-        send_email("ℹ️ Trae 签到：今日不可用",
-                   f"[{label}]\n签到活动未启用。\n\n状态:\n{json.dumps(summary, ensure_ascii=False, indent=2)}\n\n时间: {datetime.datetime.now()}",
-                   account_label=label)
         return 0
 
-    # 2. 执行签到
+    # 2. 领取
     log(f"[{label}] 正在领取每日签到...")
     try:
-        code, claim = api_call(f"{API_BASE}/claim", token, region)
-        log(f"[{label}] claim -> HTTP {code}, body={json.dumps(claim, ensure_ascii=False)[:200]}")
-        if code == 200 and (claim.get("code") == 0 or claim.get("message") == "success"):
-            # 再查一次状态确认
-            try:
-                _, after = api_call(f"{API_BASE}/status", token, region)
-                after_data = unwrap_resp(after)
-                credits = after_data.get("credits", 0)
-                extra = after_data.get("extra_credits", 0)
-                log(f"✅ [{label}] 签到成功！获得积分：基础 {credits} + 额外 {extra} = {credits + extra}")
-            except Exception:
-                log(f"✅ [{label}] 签到成功！")
-            append_log({"event": "success", "ok": True, "claim": claim}, account=label)
+        code, claim = checkin_api(auth, "claim")
+        log(f"[{label}] claim -> HTTP {code}")
+        log(f"  {json.dumps(claim, ensure_ascii=False)[:200]}")
+        if code == 200 and claim.get("code") in (0, None):
+            # 再查一次确认
+            _, after = checkin_api(auth, "status")
+            c = after.get("credits", 0)
+            e = after.get("extra_credits", 0)
+            log(f"✅ [{label}] 签到成功！基础 {c} + 额外 {e} = {c + e}")
+            append_log({"event": "success", "ok": True, "credits": c + e}, account=label)
             return 0
         else:
             msg = claim.get("message") or json.dumps(claim, ensure_ascii=False)[:200]
-            log(f"INFO [{label}] 领取未成功: {msg}")
-            append_log({"event": "claim_skip", "ok": True, "claim": claim}, account=label)
-            send_email("⚠️ Trae 签到：领取未成功",
-                       f"[{label}]\n领取每日签到未成功：{msg}\n\n时间: {datetime.datetime.now()}",
+            log(f"WARN [{label}] 领取未成功: code={claim.get('code')}, msg={msg}")
+            append_log({"event": "claim_fail", "ok": False, "resp": claim}, account=label)
+            send_email("⚠️ Trae 签到：领取失败",
+                       f"[{label}]\ncode={claim.get('code')}\nmessage={msg}\n\n时间: {datetime.datetime.now()}",
                        account_label=label)
-            return 0
+            return 1
     except Exception as e:
         log(f"ERROR [{label}] 领取异常: {e}")
         append_log({"event": "claim_error", "ok": False, "msg": str(e)}, account=label)
-        send_email("⚠️ Trae 签到失败",
-                   f"[{label}]\n领取每日签到时发生异常：{e}\n时间: {datetime.datetime.now()}",
-                   account_label=label)
         return 1
 
 
 def main():
     parser = argparse.ArgumentParser(description="Trae CN / TRAE SOLO CN 每日自动签到")
-    parser.add_argument("--check-only", action="store_true", help="只查询签到状态，不领取")
+    parser.add_argument("--check-only", action="store_true", help="只查询不领取")
     args = parser.parse_args()
 
     log("=" * 50)
@@ -357,7 +431,6 @@ def main():
     if not accounts:
         log("ERROR 没有可用登录态")
         log("请先在 Trae CN 客户端登录，或设置环境变量 TRAE_ACCESS_TOKEN")
-        append_log({"event": "no_token", "ok": False})
         sys.exit(1)
 
     log(f"共 {len(accounts)} 个账号: " + ", ".join(l for l, _ in accounts))
