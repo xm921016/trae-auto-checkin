@@ -1,12 +1,12 @@
 # Trae CN / TRAE SOLO CN 每日自动签到
-# 每天 UTC 16:30 运行（北京时间 00:30，冷门时段限流概率极低）
+# 每天 UTC 19:00 运行（北京时间 03:00，全网最冷时段，避免限流）
 
 name: Trae Daily Check-in
 
 on:
   schedule:
-    # 每天 00:30 北京时间 (UTC+8) -> UTC 16:30
-    - cron: '30 16 * * *'
+    # 每天 03:00 北京时间 (UTC+8) -> UTC 19:00
+    - cron: '0 19 * * *'
   workflow_dispatch:   # 允许手动触发
 
 jobs:
@@ -45,3 +45,4 @@ jobs:
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
           MAIL_TO: ${{ secrets.MAIL_TO }}
         run: python trae_checkin.py
+
