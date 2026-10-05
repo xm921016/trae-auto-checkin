@@ -390,32 +390,58 @@ def process_account(args, label, auth):
         append_log({"event": "disabled", "ok": True, "summary": summary}, account=label)
         return 0
 
-    # 2. 领取
+    # 2. 领取（带重试）
+    # 可重试错误码：9074 限流 / 9004 参数抖动 / 9999 系统繁忙
+    RETRY_CODES = {9074, 9004, 9999}
+    MAX_RETRY = 3
+    wait_seconds = [15, 30, 60]  # 指数退避
+
     log(f"[{label}] 正在领取每日签到...")
-    try:
-        code, claim = checkin_api(auth, "claim")
-        log(f"[{label}] claim -> HTTP {code}")
-        log(f"  {json.dumps(claim, ensure_ascii=False)[:200]}")
-        if code == 200 and claim.get("code") in (0, None):
-            # 再查一次确认
-            _, after = checkin_api(auth, "status")
-            c = after.get("credits", 0)
-            e = after.get("extra_credits", 0)
-            log(f"✅ [{label}] 签到成功！基础 {c} + 额外 {e} = {c + e}")
-            append_log({"event": "success", "ok": True, "credits": c + e}, account=label)
-            return 0
-        else:
+    for attempt in range(1, MAX_RETRY + 2):
+        try:
+            code, claim = checkin_api(auth, "claim")
+            log(f"[{label}] claim 第 {attempt} 次 -> HTTP {code}")
+            log(f"  {json.dumps(claim, ensure_ascii=False)[:200]}")
+
+            if code == 200 and claim.get("code") in (0, None):
+                # 成功
+                _, after = checkin_api(auth, "status")
+                c = after.get("credits", 0)
+                e = after.get("extra_credits", 0)
+                log(f"✅ [{label}] 签到成功！基础 {c} + 额外 {e} = {c + e}")
+                append_log({"event": "success", "ok": True, "credits": c + e, "attempt": attempt}, account=label)
+                return 0
+
+            api_code = claim.get("code")
             msg = claim.get("message") or json.dumps(claim, ensure_ascii=False)[:200]
-            log(f"WARN [{label}] 领取未成功: code={claim.get('code')}, msg={msg}")
-            append_log({"event": "claim_fail", "ok": False, "resp": claim}, account=label)
+
+            if attempt <= MAX_RETRY and (api_code in RETRY_CODES or code >= 500):
+                # 可重试
+                w = wait_seconds[attempt - 1]
+                log(f"WARN [{label}] 可重试错误 code={api_code}，{w} 秒后第 {attempt + 1} 次重试...")
+                append_log({"event": "claim_retry", "code": api_code, "msg": msg, "attempt": attempt}, account=label)
+                time.sleep(w)
+                continue
+
+            # 不可重试或已用完重试次数
+            log(f"ERROR [{label}] 领取失败: code={api_code}, msg={msg}")
+            append_log({"event": "claim_fail", "ok": False, "code": api_code, "msg": msg, "attempt": attempt}, account=label)
             send_email("⚠️ Trae 签到：领取失败",
-                       f"[{label}]\ncode={claim.get('code')}\nmessage={msg}\n\n时间: {datetime.datetime.now()}",
+                       f"[{label}]\n重试 {attempt} 次后仍失败\ncode={api_code}\nmessage={msg}\n\n时间: {datetime.datetime.now()}",
                        account_label=label)
             return 1
-    except Exception as e:
-        log(f"ERROR [{label}] 领取异常: {e}")
-        append_log({"event": "claim_error", "ok": False, "msg": str(e)}, account=label)
-        return 1
+
+        except Exception as e:
+            if attempt <= MAX_RETRY:
+                w = wait_seconds[attempt - 1]
+                log(f"WARN [{label}] 网络异常，{w} 秒后第 {attempt + 1} 次重试: {e}")
+                time.sleep(w)
+                continue
+            log(f"ERROR [{label}] 领取异常: {e}")
+            append_log({"event": "claim_error", "ok": False, "msg": str(e)}, account=label)
+            return 1
+
+    return 1
 
 
 def main():
