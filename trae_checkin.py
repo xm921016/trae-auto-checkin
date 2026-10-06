@@ -282,18 +282,45 @@ def build_headers(auth):
     return headers
 
 
+def get_proxy_url():
+    """返回 TRAE_PROXY（Cloudflare Workers URL），没有则空"""
+    return os.environ.get("TRAE_PROXY", "").strip()
+
+
 def checkin_api(auth, path):
     """发请求到 checkin_credits 接口。成功返回 (status_code, json_body)"""
     host = auth.get("_host", DEFAULT_HOST)
     url = f"{host}/trae/api/v2/ug/checkin_credits/{path}"
     headers = build_headers(auth)
-    # status: 空 body {} 即可; claim 也是空 body！（和 Trae 客户端一致）
     body = {}
-    resp = requests.post(url, headers=headers, json=body, timeout=30)
-    try:
-        return resp.status_code, resp.json()
-    except Exception:
-        return resp.status_code, {"message": resp.text[:300]}
+    proxy = get_proxy_url()
+
+    if proxy and ("workers.dev" in proxy.lower() or "/proxy" in proxy.lower()):
+        # === Cloudflare Workers 代理模式 ===
+        # Workers 不支持 HTTP CONNECT 隧道，所以走 "POST /proxy" REST 转发
+        log(f"  [Workers 代理] -> {proxy}")
+        try:
+            resp = requests.post(
+                proxy.rstrip("/") + "/proxy",
+                json={"url": url, "method": "POST", "headers": headers, "body": body},
+                timeout=30,
+            )
+            try:
+                return resp.status_code, resp.json()
+            except Exception:
+                return resp.status_code, {"message": resp.text[:300]}
+        except Exception as e:
+            return 0, {"message": f"proxy error: {e}"}
+    else:
+        # === 标准 requests 直连 ===
+        proxies = None
+        if proxy:
+            proxies = {"http": proxy, "https": proxy}
+        resp = requests.post(url, headers=headers, json=body, timeout=30, proxies=proxies)
+        try:
+            return resp.status_code, resp.json()
+        except Exception:
+            return resp.status_code, {"message": resp.text[:300]}
 
 
 # ===== 邮件 =====
