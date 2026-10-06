@@ -393,8 +393,8 @@ def process_account(args, label, auth):
     # 2. 领取（带重试）
     # 可重试错误码：9074 限流 / 9004 参数抖动 / 9999 系统繁忙
     RETRY_CODES = {9074, 9004, 9999}
-    MAX_RETRY = 3
-    wait_seconds = [15, 30, 60]  # 指数退避
+    MAX_RETRY = 7  # 兜底场景等足 10 分钟
+    wait_seconds = [10, 20, 45, 90, 120, 180, 240]  # 阶梯递增 + 抖动
 
     log(f"[{label}] 正在领取每日签到...")
     for attempt in range(1, MAX_RETRY + 2):
