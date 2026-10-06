@@ -44,5 +44,8 @@ jobs:
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
           MAIL_TO: ${{ secrets.MAIL_TO }}
+          # API 代理（可选，Cloudflare Workers URL，解决 GitHub Actions IP 被限流 9074）
+          TRAE_PROXY: ${{ secrets.TRAE_PROXY }}
         run: python trae_checkin.py
+
 
