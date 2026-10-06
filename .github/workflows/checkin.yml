@@ -11,7 +11,7 @@ on:
 
 jobs:
   checkin:
-    runs-on: ubuntu-latest-arm64  # GCP IP，避开 Azure 被 Trae 限流的问题
+    runs-on: macos-latest  # MacStadium AWS IP，避开 Azure 限流
     timeout-minutes: 25
     steps:
       - name: Checkout
