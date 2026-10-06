@@ -1,5 +1,5 @@
 # Trae CN / TRAE SOLO CN 每日自动签到
-# 每天 UTC 19:00 运行（北京时间 03:00，全网最冷时段，避免限流）
+# 每天 UTC 19:00 运行（北京时间 03:00）
 
 name: Trae Daily Check-in
 
@@ -12,7 +12,7 @@ on:
 jobs:
   checkin:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@v4
