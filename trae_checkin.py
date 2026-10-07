@@ -42,6 +42,10 @@ except ImportError:
     print("缺少依赖，请先: pip install requests pycryptodome")
     sys.exit(1)
 
+# ===== 全局会话（复用 TCP 连接，参照贴吧 TiebaClient 模式）=====
+_SESSION = requests.Session()
+_SESSION.headers.update({"Connection": "keep-alive"})
+
 # ===== 常量 =====
 # iCube 登录态解密常量（与 Trae 客户端加密格式对应）
 HDR_LEN = 6
@@ -229,7 +233,7 @@ def refresh_token(auth):
         return False
     host = auth.get("_host", DEFAULT_HOST)
     try:
-        r = requests.post(
+        r = _SESSION.post(
             f"{host}/cloudide/api/v3/trae/oauth/ExchangeToken",
             headers={"Content-Type": "application/json"},
             json={
@@ -255,24 +259,37 @@ def refresh_token(auth):
 def build_headers(auth):
     """构造完整请求 headers（与 Trae 客户端一致）"""
     token = auth["token"]
-    uid = str(auth.get("userId", ""))
+    uid = str(auth.get("userId") or "").strip()
     fp = auth.get("_fingerprint") or {}
     device_type, os_version = detect_os()
 
-    # 生成稳定的 device-id（无则随机）
-    dev_id = fp.get("deviceId") or hashlib.sha256(uuid.uuid4().bytes).hexdigest()[:32]
-    machine_id = fp.get("machineId") or hashlib.sha256(uuid.uuid4().bytes).hexdigest()
+    if not uid:
+        raise RuntimeError(
+            "userId 为空！API 会返回 9004。"
+            "请在 GitHub Secrets 中添加 TRAE_USER_ID，"
+            "或确保本地 storage.json 中包含完整登录态。"
+        )
+
+    # 设备指纹：优先用传入值；都没有才随机（警告）
+    dev_id = fp.get("deviceId")
+    machine_id = fp.get("machineId")
+    if not dev_id:
+        dev_id = hashlib.sha256(uuid.uuid4().bytes).hexdigest()[:32]
+        log("WARN deviceId 未配置，使用随机值（可能触发风控）")
+    if not machine_id:
+        machine_id = hashlib.sha256(uuid.uuid4().bytes).hexdigest()
+        log("WARN machineId 未配置，使用随机值（可能触发风控）")
 
     headers = {
         "Authorization": f"Cloud-IDE-JWT {token}",
         "X-Cloudide-Token": token,
         "x-uid": uid,
         "x-app-id": DEFAULT_APP_ID,
-        "x-device-id": dev_id,
-        "x-machine-id": machine_id,
+        "x-device-id": str(dev_id),
+        "x-machine-id": str(machine_id),
         "x-request-id": str(uuid.uuid4()),
-        "x-ide-version": fp.get("ideVersion") or "3.5.0",
-        "x-ide-version-code": fp.get("ideVersionCode") or "20260101",
+        "x-ide-version": fp.get("ideVersion") or "2.3.87416",
+        "x-ide-version-code": fp.get("ideVersionCode") or "2387416",
         "x-device-type": device_type,
         "x-os-version": os_version,
         "Content-Type": "application/json",
@@ -300,7 +317,7 @@ def checkin_api(auth, path):
         # Workers 不支持 HTTP CONNECT 隧道，所以走 "POST /proxy" REST 转发
         log(f"  [Workers 代理] -> {proxy}")
         try:
-            resp = requests.post(
+            resp = _SESSION.post(
                 proxy.rstrip("/") + "/proxy",
                 json={"url": url, "method": "POST", "headers": headers, "body": body},
                 timeout=30,
@@ -312,11 +329,11 @@ def checkin_api(auth, path):
         except Exception as e:
             return 0, {"message": f"proxy error: {e}"}
     else:
-        # === 标准 requests 直连 ===
+        # === 标准直连（复用全局 Session）===
         proxies = None
         if proxy:
             proxies = {"http": proxy, "https": proxy}
-        resp = requests.post(url, headers=headers, json=body, timeout=30, proxies=proxies)
+        resp = _SESSION.post(url, headers=headers, json=body, timeout=30, proxies=proxies)
         try:
             return resp.status_code, resp.json()
         except Exception:
@@ -360,14 +377,23 @@ def process_account(args, label, auth):
     log(f"===== [{label}] 开始签到 =====")
 
     # Token 临期自动刷新
-    try:
-        expired_at = int(auth.get("expiredAt") or 0)
-    except (ValueError, TypeError):
-        expired_at = 0
+    expired_at = 0
+    raw_exp = auth.get("expiredAt")
+    if isinstance(raw_exp, (int, float)):
+        expired_at = int(raw_exp)
+    elif isinstance(raw_exp, str) and raw_exp.strip():
+        try:
+            # ISO 8601 格式: "2026-10-17T03:17:02.474Z"
+            dt = datetime.datetime.fromisoformat(raw_exp.replace("Z", "+00:00"))
+            expired_at = int(dt.timestamp() * 1000)
+        except Exception:
+            pass
     if expired_at and expired_at / 1000 < time.time() + 30 * 60:
-        log(f"[{label}] token 即将过期，尝试刷新...")
+        log(f"[{label}] token 即将过期 (raw={raw_exp})，尝试刷新...")
         if refresh_token(auth):
             log(f"  token 刷新成功 ✅")
+        else:
+            log(f"  token 刷新失败，将继续尝试用现有 token")
 
     # 1. 查询状态
     try:
@@ -479,6 +505,12 @@ def main():
     log("=" * 50)
     log("Trae CN / TRAE SOLO CN 每日自动签到")
     log("=" * 50)
+
+    # 启动随机延迟 0~10 分钟，错开 GitHub Actions 签到高峰
+    # （Trae API 对密集请求会返回 9074 限流）
+    delay = random.uniform(0, 600)
+    log(f"启动延迟 {delay:.0f} 秒（避开高峰）...")
+    time.sleep(delay)
 
     accounts = load_all_accounts()
     if not accounts:
