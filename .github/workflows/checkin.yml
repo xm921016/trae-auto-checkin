@@ -11,8 +11,8 @@ on:
 
 jobs:
   checkin:
-    runs-on: macos-latest  # MacStadium AWS IP，避开 Azure 限流
-    timeout-minutes: 25
+    runs-on: ubuntu-latest  # 与贴吧一致，Azure IP 段限流更轻
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -27,24 +27,34 @@ jobs:
 
       - name: Run Trae check-in
         env:
-          # 账号1（必需，至少配置一个）
+          # ===== 账号1（必需，至少配置一个）=====
+          # 认证凭据
           TRAE_ACCESS_TOKEN: ${{ secrets.TRAE_ACCESS_TOKEN }}
           TRAE_REFRESH_TOKEN: ${{ secrets.TRAE_REFRESH_TOKEN }}
           TRAE_USER_REGION: ${{ secrets.TRAE_USER_REGION }}
-          # 账号2+（可选）
+          # ⚠️ 以下字段从本地 Trae CN storage.json 提取（解密 auth + 读取 fingerprint）
+          # 缺失会导致 x-uid 为空 → API 返回 9004 参数错误
+          TRAE_USER_ID: ${{ secrets.TRAE_USER_ID }}
+          TRAE_DEVICE_ID: ${{ secrets.TRAE_DEVICE_ID }}
+          TRAE_MACHINE_ID: ${{ secrets.TRAE_MACHINE_ID }}
+          TRAE_IDE_VERSION: ${{ secrets.TRAE_IDE_VERSION }}
+          TRAE_IDE_VERSION_CODE: ${{ secrets.TRAE_IDE_VERSION_CODE }}
+          # ===== 账号2+（可选）=====
           TRAE_ACCESS_TOKEN_2: ${{ secrets.TRAE_ACCESS_TOKEN_2 }}
           TRAE_REFRESH_TOKEN_2: ${{ secrets.TRAE_REFRESH_TOKEN_2 }}
           TRAE_USER_REGION_2: ${{ secrets.TRAE_USER_REGION_2 }}
+          TRAE_USER_ID_2: ${{ secrets.TRAE_USER_ID_2 }}
           TRAE_ACCESS_TOKEN_3: ${{ secrets.TRAE_ACCESS_TOKEN_3 }}
           TRAE_REFRESH_TOKEN_3: ${{ secrets.TRAE_REFRESH_TOKEN_3 }}
           TRAE_USER_REGION_3: ${{ secrets.TRAE_USER_REGION_3 }}
-          # 邮件通知（可选，SMTP_HOST 等全部配置才会发送）
+          TRAE_USER_ID_3: ${{ secrets.TRAE_USER_ID_3 }}
+          # ===== 邮件通知（可选，SMTP_HOST 等全部配置才会发送）=====
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
           MAIL_TO: ${{ secrets.MAIL_TO }}
-          # API 代理（可选，Cloudflare Workers URL，解决 GitHub Actions IP 被限流 9074）
+          # ===== API 代理（可选，Cloudflare Workers URL，解决 GitHub Actions IP 被限流 9074）=====
           TRAE_PROXY: ${{ secrets.TRAE_PROXY }}
         run: python trae_checkin.py
 
