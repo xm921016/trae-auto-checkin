@@ -400,9 +400,9 @@ def process_account(args, label, auth):
         code, body = checkin_api(auth, "status")
         log(f"[{label}] status -> HTTP {code}")
         log(f"  {json.dumps(body, ensure_ascii=False)[:200]}")
-        if code == 401:
-            # token 过期，尝试刷新后重试
-            log(f"[{label}] 收到 401，刷新 token 后重试...")
+        if code == 401 or body.get("code") == 1001:
+            # token 失效/过期（401 或 code=1001 认证失败），尝试刷新后重试
+            log(f"[{label}] 认证失败（HTTP {code} / code={body.get('code')}），刷新 token 后重试...")
             if refresh_token(auth):
                 code, body = checkin_api(auth, "status")
                 log(f"  重试后 HTTP {code}")
