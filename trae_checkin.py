@@ -416,6 +416,9 @@ def process_account(args, label, auth):
     except Exception as e:
         log(f"ERROR [{label}] 查询状态异常: {e}")
         append_log({"event": "status_error", "ok": False, "msg": str(e)}, account=label)
+        send_email("⚠️ Trae 签到：查询状态异常",
+                   f"[{label}]\n异常: {e}\n时间: {datetime.datetime.now()}",
+                   account_label=label)
         return 1
 
     summary = {
@@ -492,6 +495,9 @@ def process_account(args, label, auth):
                 continue
             log(f"ERROR [{label}] 领取异常: {e}")
             append_log({"event": "claim_error", "ok": False, "msg": str(e)}, account=label)
+            send_email("⚠️ Trae 签到：领取异常",
+                       f"[{label}]\n重试 {attempt} 次后仍异常\n{e}\n\n时间: {datetime.datetime.now()}",
+                       account_label=label)
             return 1
 
     return 1
@@ -516,6 +522,8 @@ def main():
     if not accounts:
         log("ERROR 没有可用登录态")
         log("请先在 Trae CN 客户端登录，或设置环境变量 TRAE_ACCESS_TOKEN")
+        send_email("⚠️ Trae 签到：没有可用登录态",
+                   f"未加载到任何账号，请检查 TRAE_ACCESS_TOKEN / TRAE_USER_ID 等配置。\n时间: {datetime.datetime.now()}")
         sys.exit(1)
 
     log(f"共 {len(accounts)} 个账号: " + ", ".join(l for l, _ in accounts))
